@@ -36,26 +36,34 @@ export class CodexSkillProvider {
     const candidates = [];
     for (const root of this.#roots) {
       signal?.throwIfAborted?.();
-      let entries;
-      try {
-        entries = await readdir(root, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        if (!this.#includeSystem && entry.name === SYSTEM_DIR) continue;
-        const full = join(root, entry.name);
-        if (entry.isDirectory()) {
-          const skillFile = join(full, 'SKILL.md');
-          const parsed = await tryParse(skillFile);
-          if (parsed !== undefined) candidates.push(candidateOf(parsed, skillFile));
-        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
-          const parsed = await tryParse(full);
-          if (parsed !== undefined) candidates.push(candidateOf(parsed, full));
-        }
-      }
+      await this.#collect(root, candidates, signal);
     }
     return { candidates, complete: true };
+  }
+
+  /** Collect skills from one root; the reserved `.system` directory holds its own skills one level down. */
+  async #collect(root, candidates, signal) {
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      signal?.throwIfAborted?.();
+      const full = join(root, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === SYSTEM_DIR) {
+          if (this.#includeSystem) await this.#collect(full, candidates, signal);
+          continue;
+        }
+        const parsed = await tryParse(join(full, 'SKILL.md'));
+        if (parsed !== undefined) candidates.push(candidateOf(parsed, join(full, 'SKILL.md')));
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+        const parsed = await tryParse(full);
+        if (parsed !== undefined) candidates.push(candidateOf(parsed, full));
+      }
+    }
   }
 
   async get(candidate) {
@@ -253,24 +261,32 @@ export class SkillMirror {
 
   async #scan(root) {
     const found = new Map();
+    await this.#scanFlat(root, found);
+    if (this.#config.syncSkills.includeSystem) {
+      // `.system` is a container of Codex's own skills, one level deeper than the root.
+      await this.#scanFlat(join(root, SYSTEM_DIR), found);
+    }
+    return found;
+  }
+
+  /** Record every directory of one flat root that holds a `SKILL.md`. */
+  async #scanFlat(dir, found) {
     let entries;
     try {
-      entries = await readdir(root, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
-      return found;
+      return;
     }
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name === SYSTEM_DIR && !this.#config.syncSkills.includeSystem) continue;
-      const dir = join(root, entry.name);
+      if (!entry.isDirectory() || entry.name === SYSTEM_DIR) continue;
+      const skillDir = join(dir, entry.name);
       try {
-        await stat(join(dir, 'SKILL.md'));
+        await stat(join(skillDir, 'SKILL.md'));
       } catch {
         continue;
       }
-      found.set(entry.name, { dir, hash: await hashDirectory(dir) });
+      found.set(entry.name, { dir: skillDir, hash: await hashDirectory(skillDir) });
     }
-    return found;
   }
 
   async #copy(source, target) {
