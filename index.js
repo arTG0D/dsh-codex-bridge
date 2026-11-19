@@ -1,4 +1,5 @@
 import { watch } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { normalizeConfig } from './src/config.js';
 import { resolveCodexHome, resolveDshHome } from './src/paths.js';
@@ -31,6 +32,19 @@ export async function apply(ctx, rawConfig) {
     return;
   }
 
+  // A boot marker makes "did the new module generation actually load, and did the
+  // background work start" answerable from outside the process.
+  const diagnosticsPath = join(dshHome, 'codex-bridge', 'last-run.json');
+  const writeDiagnostics = async (payload) => {
+    try {
+      await mkdir(join(dshHome, 'codex-bridge'), { recursive: true });
+      await writeFile(diagnosticsPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    } catch {
+      // Diagnostics are best effort; the plugin keeps working without them.
+    }
+  };
+  await writeDiagnostics({ event: 'boot', at: new Date().toISOString(), version: BRIDGE_VERSION, codexHome: config.codexHome });
+
   const status = {
     lastImport: null,
     lastImportAt: 0,
@@ -58,10 +72,12 @@ export async function apply(ctx, rawConfig) {
       if (summary.failed.length > 0) {
         status.lastError = summary.failed.map((entry) => `${entry.threadId}: ${entry.reason}`).join('; ');
       }
+      await writeDiagnostics({ event: 'import', at: new Date().toISOString(), dryRun: options.dryRun === true, summary });
       return summary;
     } catch (error) {
       status.lastError = errorText(error);
       log.warn(`codex-bridge: import failed: ${status.lastError}`);
+      await writeDiagnostics({ event: 'import', at: new Date().toISOString(), error: status.lastError });
       return { error: status.lastError };
     } finally {
       runImport.running = false;
@@ -84,10 +100,12 @@ export async function apply(ctx, rawConfig) {
       const result = await mirror.sync(options);
       status.lastSkillSync = result;
       status.lastSkillSyncAt = Date.now();
+      await writeDiagnostics({ event: 'skill-sync', at: new Date().toISOString(), result });
       return result;
     } catch (error) {
       status.lastError = errorText(error);
       log.warn(`codex-bridge: skill sync failed: ${status.lastError}`);
+      await writeDiagnostics({ event: 'skill-sync', at: new Date().toISOString(), error: status.lastError });
       return { error: status.lastError };
     } finally {
       runSkillSync.running = false;
@@ -248,7 +266,8 @@ function importText(summary, dryRun) {
     `failed: ${summary.failed.length}`,
   ];
   for (const entry of summary.imported.slice(0, 10)) {
-    lines.push(`  + ${entry.title} (${entry.turns} turns, ${entry.events} events) → ${entry.sessionId || 'dry run'}`);
+    const note = entry.cwdAdjusted === true ? ' (original folder missing; used its nearest parent)' : '';
+    lines.push(`  + ${entry.title} (${entry.turns} turns, ${entry.events} events) → ${entry.sessionId || 'dry run'}${note}`);
   }
   for (const entry of summary.stale.slice(0, 10)) {
     lines.push(`  ~ ${entry.title} changed in Codex after import; re-import is not automatic`);

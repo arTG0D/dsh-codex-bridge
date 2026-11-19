@@ -79,6 +79,11 @@ Writing the log by hand would skip that validation and produce sessions the toke
 - Exporting Harness sessions back to Codex is not implemented yet.
 - Imported tool calls are history only; they are not callable tools in the Harness.
 - `~/.agents/skills` is intentionally not mirrored: both products already read it.
+- A thread whose recorded `cwd` no longer exists is imported into the nearest existing parent directory instead of being dropped; `/codex-import` notes when that happened.
+
+## Troubleshooting
+
+`~/.dsh/codex-bridge/last-run.json` records the most recent import or skill sync — including the error text when one failed — so a silent background failure is still diagnosable. `~/.dsh/codex-bridge/state.json` records which threads were imported and where.
 
 ## License
 

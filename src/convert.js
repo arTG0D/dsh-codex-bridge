@@ -20,6 +20,14 @@ export const IMPORTED_MODEL_SOURCE = Object.freeze({ provider: 'codex', model: '
 /** Longest single diff or tool output kept verbatim; longer content is truncated for the log. */
 const MAX_BLOCK_CHARS = 4_000;
 
+/** Thrown when a thread holds nothing the model ever saw, so it becomes no Session. */
+export class NoImportableTurnError extends Error {
+  constructor(message = 'the thread contains no importable turn') {
+    super(message);
+    this.name = 'NoImportableTurnError';
+  }
+}
+
 /**
  * Convert one thread to a seed log.
  * @param {object} input - thread metadata, turns, and items read from the Codex databases.
@@ -53,7 +61,7 @@ export function convertThread({ thread, turns, items, maxTitleBytes = 200 }) {
   }
 
   if (turnNumber === 0) {
-    throw new Error('the thread contains no importable turn');
+    throw new NoImportableTurnError();
   }
   return { title, createdAt, events: builder.events };
 }

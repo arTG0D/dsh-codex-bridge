@@ -1,5 +1,9 @@
 import { stat } from 'node:fs/promises';
-import { convertThread } from './convert.js';
+import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { convertThread, NoImportableTurnError } from './convert.js';
 import { CodexStore } from './codex-store.js';
 import { normalizePath, pathKey } from './paths.js';
 
@@ -53,15 +57,28 @@ export class SessionImporter {
           if (highest > (recorded.lastOrdinal ?? 0)) {
             summary.stale.push({ threadId: thread.id, title: thread.title, sessionId: recorded.sessionId });
           } else {
-            summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: recorded.sessionId });
+            summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: recorded.sessionId, reason: 'already imported' });
           }
           continue;
         }
         try {
-          const outcome = await this.#importThread({ store, thread, session, dryRun, signal: options.signal });
-          if (outcome === undefined) summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: '' });
-          else summary.imported.push(outcome);
+          const items = store.listItems(thread.id);
+          if (items.length === 0) {
+            // A thread Codex created but never wrote an item to has nothing to import.
+            summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: '', reason: 'no recorded items' });
+            continue;
+          }
+          const outcome = await this.#importThread({ store, thread, items, session, dryRun, signal: options.signal });
+          if (outcome === undefined) {
+            summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: '', reason: 'nothing model-visible' });
+          } else {
+            summary.imported.push(outcome);
+          }
         } catch (error) {
+          if (error instanceof NoImportableTurnError) {
+            summary.skipped.push({ threadId: thread.id, title: thread.title, sessionId: '', reason: error.message });
+            continue;
+          }
           this.#log.warn(`codex-bridge: thread ${thread.id} was not imported: ${errorText(error)}`);
           summary.failed.push({ threadId: thread.id, title: thread.title, reason: errorText(error) });
         }
@@ -76,13 +93,10 @@ export class SessionImporter {
     return summary;
   }
 
-  async #importThread({ store, thread, session, dryRun, signal }) {
-    const cwd = normalizePath(thread.cwd);
-    if (cwd.length === 0 || !(await isDirectory(cwd))) {
-      throw new Error(`working directory does not exist: ${cwd || '(empty)'}`);
-    }
+  async #importThread({ store, thread, items, session, dryRun, signal }) {
+    const resolved = await resolveWorkingDirectory(thread.cwd);
+    const cwd = resolved.path;
     const turns = store.listTurns(thread.id);
-    const items = store.listItems(thread.id);
     const conversion = convertThread({ thread, turns, items, maxTitleBytes: 200 });
 
     if (dryRun) {
@@ -92,6 +106,7 @@ export class SessionImporter {
         sessionId: '',
         events: conversion.events.length,
         turns: turns.length,
+        cwdAdjusted: resolved.adjusted,
       };
     }
 
@@ -135,6 +150,7 @@ export class SessionImporter {
       cwd,
       title: conversion.title || thread.title,
       workspaceAttached,
+      ...(resolved.adjusted ? { requestedCwd: normalizePath(thread.cwd) } : {}),
     });
     return {
       threadId: thread.id,
@@ -142,6 +158,7 @@ export class SessionImporter {
       sessionId: String(id),
       events: conversion.events.length,
       turns: turns.length,
+      cwdAdjusted: resolved.adjusted,
     };
   }
 
@@ -166,28 +183,26 @@ export class SessionImporter {
 
   async #loadSessionModule() {
     // A profile-installed bundle lives outside the Harness installation, so a bare
-    // specifier does not resolve. Fall back to the installation anchor the Host exposes.
+    // specifier does not resolve and the Host process does not export
+    // DSH_INSTALL_DIR to its own modules. Anchor on the installation instead.
     try {
       return await import('@deepseek-ai/dsh-session');
     } catch {
       // Fall through to the anchored resolution.
     }
-    const installDir = process.env.DSH_INSTALL_DIR;
-    if (typeof installDir !== 'string' || installDir.length === 0) {
-      throw new Error(
-        'the Harness session package is not resolvable: DSH_INSTALL_DIR is unset and the bare specifier failed',
-      );
+    const attempts = [];
+    for (const directory of installCandidates()) {
+      try {
+        const anchor = pathToFileURL(join(directory, 'package.json')).href;
+        const entry = createRequire(anchor).resolve('@deepseek-ai/dsh-session');
+        return await import(pathToFileURL(entry).href);
+      } catch (error) {
+        attempts.push(`${directory}: ${errorText(error)}`);
+      }
     }
-    try {
-      const { createRequire } = await import('node:module');
-      const { pathToFileURL } = await import('node:url');
-      const { join } = await import('node:path');
-      const anchor = pathToFileURL(join(installDir, 'package.json')).href;
-      const entry = createRequire(anchor).resolve('@deepseek-ai/dsh-session');
-      return await import(pathToFileURL(entry).href);
-    } catch (error) {
-      throw new Error(`the Harness session package is not resolvable from ${installDir}: ${errorText(error)}`);
-    }
+    throw new Error(
+      `the Harness session package is not resolvable; tried:\n  ${attempts.join('\n  ')}`,
+    );
   }
 }
 
@@ -207,6 +222,59 @@ async function isDirectory(path) {
   }
 }
 
+/**
+ * The directory an imported Session runs in. Codex keeps a thread's original `cwd`,
+ * which may have been deleted or renamed since; walking up to the nearest existing
+ * ancestor keeps the conversation instead of dropping it over a missing folder.
+ * @param {string} rawCwd - the `cwd` Codex recorded.
+ * @returns {{ path: string, adjusted: boolean }}
+ */
+async function resolveWorkingDirectory(rawCwd) {
+  const requested = normalizePath(rawCwd);
+  if (requested.length > 0 && (await isDirectory(requested))) {
+    return { path: requested, adjusted: false };
+  }
+  let candidate = requested;
+  while (candidate.length > 0) {
+    const parent = dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+    if (candidate.length > 0 && (await isDirectory(candidate))) {
+      return { path: candidate, adjusted: true };
+    }
+  }
+  const home = homedir();
+  return { path: home, adjusted: true };
+}
+
 export function errorText(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Candidate directories that contain the installed `@deepseek-ai/dsh` package, in
+ * the order they are most likely to be right: an explicit export, the Electron
+ * resources root, a sibling `resources/app.asar` layout, then plain npm layouts.
+ */
+function installCandidates() {
+  const candidates = [];
+  const push = (path) => {
+    if (typeof path === 'string' && path.length > 0 && !candidates.includes(path)) candidates.push(path);
+  };
+  push(process.env.DSH_INSTALL_DIR);
+  const resources = process.resourcesPath;
+  if (typeof resources === 'string' && resources.length > 0) {
+    push(join(resources, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh'));
+    push(join(resources, 'app', 'dsh', 'node_modules', '@deepseek-ai', 'dsh'));
+  }
+  const executableDir = dirname(process.execPath);
+  push(join(executableDir, 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh'));
+  push(join(executableDir, 'node_modules', '@deepseek-ai', 'dsh'));
+  push(join(executableDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh'));
+  return candidates;
+}
+
+/** Test hook: the anchors the importer would try in this process. */
+export function describeInstallCandidates() {
+  return installCandidates();
 }

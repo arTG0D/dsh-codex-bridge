@@ -79,6 +79,11 @@ Codex 桌面版和 DeepSeek Harness 都是顺手的工具，但两边的历史�
 - 暂不支持把 Harness 会话导回 Codex。
 - 导入的工具调用只是历史记录，在 Harness 里不可调用。
 - 有意不镜像 `~/.agents/skills`：两边本来就都读这个目录。
+- 线程记录的工作目录已不存在时，会导入到最近的已存在父目录，而不是丢弃该会话；`/codex-import` 会标注这种情况。
+
+## 排障
+
+`~/.dsh/codex-bridge/last-run.json` 记录最近一次导入或技能同步的结果（失败时含错误文本），所以后台静默失败也能查。`~/.dsh/codex-bridge/state.json` 记录已导入的线程和对应会话。
 
 ## 许可
 
