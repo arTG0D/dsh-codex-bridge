@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -207,11 +208,9 @@ export class SessionImporter {
 }
 
 function randomId() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  // DSH mints every Session id as `session-<uuid>`; workspace membership, the
+  // canonical-cwd index, and the sidebar all key on that shape.
+  return `session-${randomUUID()}`;
 }
 
 async function isDirectory(path) {
