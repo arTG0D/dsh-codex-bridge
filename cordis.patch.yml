@@ -1,0 +1,17 @@
+- insert:
+    - id: codex-bridge
+      name: dsh-codex-bridge
+      config:
+        codexHome: ''
+        importSessions:
+          enabled: true
+          onStart: true
+          watch: true
+          intervalSeconds: 60
+          maxThreads: 100
+          includeArchived: false
+        syncSkills:
+          enabled: true
+          watch: true
+          includeSystem: false
+          overwrite: false

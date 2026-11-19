@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Codex bridge",
+    "description": "Imports Codex Desktop conversations into DeepSeek Harness and keeps user skills in sync both ways.",
+    "detail": "docs/DETAIL.md"
+  }
+}

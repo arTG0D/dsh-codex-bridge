@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Codex 桥接",
+    "description": "把 Codex 桌面版的会话导入 DeepSeek Harness，并在两个方向自动同步用户技能。",
+    "detail": "docs/DETAIL.md"
+  }
+}
